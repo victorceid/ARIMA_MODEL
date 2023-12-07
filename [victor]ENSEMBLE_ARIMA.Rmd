@@ -1,0 +1,901 @@
+---
+title: "Ensembles of ARIMA - Comparing Auto-ARIMA and ES-ARIMA"
+author: "John M. Drake $ Victor Felix"
+date: \today
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+In 2022-2023 student Ryan Riley initiated a series of experiments investigating the forecasting skill of ensembles of ARIMA models.
+This analysis picks up where he left off and continues that investigation.
+
+```{r load-packages, echo=TRUE, results='hide', message=FALSE}
+
+source("ENSEMBLE_ARIMA_FUNCTIONS.R", local = TRUE, chdir = TRUE)
+
+library("tidyr")
+library("feasts")
+library("MMWRweek")
+library("data.table")
+library("caret")
+library("purrr")
+library("skimr")
+library("ggcorrplot")
+library("DataExplorer")
+library("cdcfluview")
+library("dplyr")
+library("tseries")
+library("forecast")
+library("tsibble")
+library("berryFunctions")
+library("scoringutils")
+library("covidHubUtils")
+library("gtools")
+library("parallel")
+library("doParallel")
+library("foreach")
+library("future")#https://cran.r-project.org/web/packages/future/vignettes/future-4-issues.html
+library("listenv")
+library("lubridate")
+library("corrplot")
+library("sf")
+library("ggrepel")
+library("Metrics")
+```
+
+Load and prepare the data
+
+```{r load-data, echo=TRUE, message=FALSE}
+
+LET_IT_RIP<-FALSE
+
+my_data = read.csv("Fluview_20221116.csv")
+state_codes_population<-read.csv("State_Codes_Pop.csv")
+my_data = subset(my_data, select = c(ST_FIPS,week_start,ilitotal) )
+
+names(my_data)<- c("location","target_end_date","cases" )
+
+my_data$location<-as.numeric(my_data$location)
+#3. convert date to ts object
+my_data$target_end_date = as.Date(my_data$target_end_date)
+
+my_data<-my_data[order(my_data$target_end_date), ]
+rownames(my_data)<- NULL
+
+suppressWarnings(invisible(my_data[apply(my_data, 1, purrr::compose(is.finite, all)),]))#this is needed
+my_data<-na.omit(my_data)
+
+my_data=my_data[my_data$location != "",]
+
+#4. add column to df that represents the endemic week-> use the mmwr/something package
+my_data<-cbind(my_data, MMWRweek(my_data$target_end_date))
+
+state_ids = unique(my_data$location)
+grouped_by_location <- split(my_data, f = list("location"))
+grouped_data <-my_data %>% group_split(location)
+
+##################
+# add missing days
+##################
+
+begin_date<-MMWRweek2Date(my_data$MMWRyear[1], 36)
+for(i in 1:length(grouped_data) ){
+  #print(paste0("nrow_before ", nrow(grouped_data[[i]])))
+  for(date_iter in 2:nrow(grouped_data[[i]])-1 ){
+    diff =grouped_data[[i]]$target_end_date[date_iter] - grouped_data[[i]]$target_end_date[date_iter+1]
+    if(abs(diff) > 7 || (date_iter == 1 && begin_date < grouped_data[[i]]$target_end_date[date_iter]) ) {
+      if(date_iter == 1 && begin_date < grouped_data[[i]]$target_end_date[date_iter]){
+        missing_date<- begin_date
+        end_date<-grouped_data[[i]]$target_end_date[date_iter]
+        date_counter<-date_iter
+      }
+      else{
+        missing_date<-grouped_data[[i]]$target_end_date[date_iter]
+        end_date<-grouped_data[[i]]$target_end_date[date_iter+1]
+        date_counter<-date_iter+1
+        missing_date<-missing_date+7
+      }
+      while(missing_date != end_date){
+        epi_date<-MMWRweek(missing_date)
+        missing_data<- data.frame(grouped_data[[i]]$location,missing_date,0,epi_date[1],epi_date[2],epi_date[3])
+        colnames(missing_data)<-colnames(grouped_data[[i]])
+        grouped_data[[i]] <- insertRows(grouped_data[[i]], date_counter , new = missing_data)
+        date_counter<- date_counter+1
+        missing_date<-missing_date+7
+      }
+    }
+  }
+}
+```
+
+Here is a chart of the number of cases by week
+
+```{r weekly-cases, echo=TRUE, message=FALSE}
+
+for(i in 1:length(grouped_data) ){
+  title_<- state_codes_population[state_codes_population$location == grouped_data[[27]]$location[1], ]$location_name
+  p <- ggplot(grouped_data[[35]], aes(x=target_end_date, y=cases)) +geom_line()+ scale_x_date(date_breaks = "2 months")+
+    theme(axis.text.x=element_text(angle=50, hjust=1)) + labs(title = title_)
+  p
+  print(p)
+  if(!LET_IT_RIP)
+    break
+}
+
+```
+
+Here is a chart of the number of cases by week on a log scale
+
+```{r weekly-cases-log, echo=TRUE, message=FALSE}
+
+  for(i in 1:length(grouped_data) ){
+    title_<- state_codes_population[state_codes_population$location == grouped_data[[1]]$location[1], ]$location_name
+    p <- ggplot(grouped_data[[1]], aes(x=target_end_date, y=log(cases+1)   )) +geom_line()+ scale_x_date(date_breaks = "1 year")+
+      theme(axis.text.x=element_text(angle=50, hjust=1)) + labs(title = title_)
+    p
+    print(p)
+    if(!LET_IT_RIP)
+      break
+  }
+
+```
+
+Create the pdq's for the non seasonal component of the SARIMA model. The print out below shows all the combinations of the pdq's were [,1] = p, [,2] = d, [,3] = q. The com variable is  vector of the pdq's that you want to use in the model.
+
+```{r chunky4, echo=TRUE, message=FALSE}
+####################
+# Get the WIS for each State and 1-4 Weeks ahead using N number of weeks .
+###################
+
+source("ENSEMBLE_ARIMA_FUNCTIONS.R", local = TRUE, chdir = TRUE)
+
+get_4weeks_wis <- function(i){
+  wis=get_wis(US_STATE=36, auto=TRUE, my_n_ahead=i)
+  print(wis)
+}
+
+result<-mclapply(X = 1:4, FUN = get_4weeks_wis, mc.cores=4)
+result
+
+############################################################
+
+get_4weeks_wis <- function(i){
+  wis=get_wis_splits(US_STATE=36, auto=TRUE, my_n_ahead=i)
+  print(wis)
+}
+
+result<-mclapply(X = 1:4, FUN = get_4weeks_wis, mc.cores=4)
+result
+
+#two years
+#36,21.02,21.79,AUTO,1,Ohio
+#36,43.54,43.26,ES,2,Ohio
+#36,65.43,63.37,ES,3,Ohio
+#36,87.14,83.11,ES,4,Ohio
+
+#three years
+#"36-Ohio, WIS:21.267, WEEK AHEAD:1"
+#"36-Ohio, WIS:42.078, WEEK AHEAD:2"
+#"36-Ohio, WIS:61.111, WEEK AHEAD:3"
+#"36-Ohio, WIS:78.228, WEEK AHEAD:4"
+
+```
+
+
+
+```{r chunky4, echo=TRUE, message=FALSE}
+# MODEL_RESULTS
+#STATE_NUMBER,AUTO_WIS,ES_WIS,BEST_WIS,WEEK_AHEAD,NAME
+#1,58.15,60.11,AUTO,1,Alabama 
+#1,127.89,133.16,AUTO,2,Alabama
+#1,198.25,207.51,AUTO,3,Alabama
+#1,260.93,279.18,AUTO,4,Alabama
+
+#2,10.51,10.75,AUTO,1,Alaska
+#2,18.16,18.83,AUTO,2,Alaska
+#2,22.72,23.18,AUTO,3,Alaska
+#2,27.07,27.23,AUTO,4,Alaska
+
+#3,23.33,23.86,AUTO,1,Arizona
+#3,48.06,48.05,ES,2,Arizona
+#3,63.43,62.13,ES,3,Arizona
+#3,78.83,77.14,ES,4,Arizona
+
+#4,15.65,16.28,AUTO,1,Arkansas
+#4,28.43,28.75,AUTO,2,Arkansas
+#4,38.16,37.42,ES,3,Arkansas
+#4,47.68,45.46,ES,4,Arkansas
+
+#5,56.95,58.75,AUTO,1,California
+#5,125.07,123.11,ES,2,California
+#5,191.55,184.18,ES,3,California
+#5,253.67,235.81,ES,4,California
+
+#6,43.46,43.29,ES,1,Colorado
+#6,68.75,67.45,ES,2,Colorado
+#6,98.35,95.77,ES,3,Colorado
+#6,123.99,120.23,ES,4,Colorado
+
+#7,34.02,34.01,ES,1,Connecticut
+#7,60.61,61.12,AUTO,2,Connecticut
+#7,83.80,87.88,AUTO,3,Connecticut
+#7,105.40,113.26,AUTO,4,Connecticut
+
+#8,4.94,4.92,ES,1,Delaware
+#8,8.61,8.75,AUTO,2,Delaware
+#8,10.86,11.21,AUTO,3,Delaware
+#8,12.88,13.55,AUTO,4,Delaware
+
+#9,39.41,37.60,ES,1,District of Columbia
+#9,48.50,47.33,ES,2,District of Columbia
+#9,54.45,52.89,ES,3,District of Columbia
+#9,60.67,59.19,ES,4,District of Columbia
+
+#10,xx,xx,xx,1,Florida
+#10,xx,xx,xx,2,Florida
+#10,xx,xx,xx,3,Florida
+#10,xx,xx,xx,4,Florida
+
+#11,92.94,93.41,AUTO,1,Georgia
+#11,181.00,181.89,AUTO,2,Georgia
+#11,301.61,303.03,AUTO,3,Georgia
+#11,406.56,410.65,AUTO,4,Georgia
+
+#12,8.41,9.02,AUTO,1,Hawaii
+#12,16.16,15.75,ES,2,Hawaii
+#12,21.64,20.32,ES,3,Hawaii
+#12,24.49,24.33,ES,4,Hawaii
+
+#13,7.63,7.49,ES,1,Idaho
+#13,12.75,12.48,ES,2,Idaho
+#13,16.43,16.00,ES,3,Idaho
+#13,19.32,18.73,ES,4,Idaho
+
+#14,48.78,51.19,AUTO,1,Illinois
+#14,109.67,106.48,ES,2,Illinois
+#14,174.37,164.52,ES,3,Illinois
+#14,232.45,215.87,ES,4,Illinois
+
+#15,20.09,20.81,AUTO,1,Indiana
+#15,37.43,38.86,AUTO,2,Indiana
+#15,51.26,53.10,AUTO,3,Indiana
+#15,63.42,65.34,AUTO,4,Indiana
+
+#16,7.75,7.50,ES,1,Iowa
+#16,15.43,15.29,ES,2,Iowa
+#16,19.78,20.02,AUTO,3,Iowa
+#16,23.20,23.88,AUTO,4,Iowa
+
+#17,21.51,23.02,AUTO,1,Kansas
+#17,34.44,36.52,AUTO,2,Kansas
+#17,48.50,50.99,AUTO,3,Kansas
+#17,61.08,65.13,AUTO,4,Kansas
+
+#18,31.73,33.15,AUTO,1,Kentucky
+#18,56.12,57.00,AUTO,2,Kentucky
+#18,77.00,77.19,AUTO,3,Kentucky
+#18,97.44,96.18,ES,4,Kentucky
+
+#19,74.32,72.40,ES,1,Louisiana
+#19,162.83,153.52,ES,2,Louisiana
+#19,266.08,241.93,ES,3,Louisiana
+#19,361.02,320.34,ES,4,Louisiana
+
+#20,11.35,10.96,ES,1,Maine
+#20,17.80,17.03,ES,2,Maine
+#20,23.21,22.26,ES,3,Maine
+#20,29.43,28.14,ES,4,Maine
+
+#21,36.79,42.03,AUTO,1,Maryland
+#21,64.86,77.74,AUTO,2,Maryland
+#21,89.55,104.07,AUTO,3,Maryland
+#21,114.72,156.42,AUTO,4,Maryland
+
+#22,33.34,34.96,AUTO,1,Massachusetts
+#22,67.31,67.55,AUTO,2,Massachusetts
+#22,105.82,104.43,ES,3,Massachusetts
+#22,139.44,134.90,ES,4,Massachusetts
+
+#23,30.64,30.62,ES,1,Michigan
+#23,56.67,56.21,ES,2,Michigan
+#23,81.16,79.58,ES,3,Michigan
+#23,106.35,103.47,ES,4,Michigan
+
+#24,17.21,16.97,ES,1,Minnesota
+#24,31.57,31.00,ES,2,Minnesota
+#24,43.06,41.97,ES,3,Minnesota
+#24,53.26,51.32,ES,4,Minnesota
+
+#25,29.04,30.86,AUTO,1,Mississippi
+#25,69.62,70.88,AUTO,2,Mississippi
+#25,99.75,102.06,AUTO,3,Mississippi
+#25,132.48,131.59,ES,4,Mississippi
+
+#26,23.26,24.04,AUTO,1,Missouri
+#26,39.73,40.35,AUTO,2,Missouri
+#26,52.27,54.37,AUTO,3,Missouri
+#26,65.26,70.15,AUTO,4,Missouri
+
+#27,5.198,5.191,ES,1,Montana
+#27,9.13,9.09,ES,2,Montana
+#27,12.19,12.02,ES,3,Montana
+#27,15.11,14.85,ES,4,Montana
+
+#28,18.45,18.40,ES,1,Nebraska
+#28,30.73,30.57,ES,2,Nebraska
+#28,42.10,41.06,ES,3,Nebraska
+#28,53.80,51.51,ES,4,Nebraska
+
+#29,15.58,15.97,AUTO,1,Nevada
+#29,27.72,27.44,ES,2,Nevada
+#29,36.27,34.82,ES,3,Nevada
+#29,44.44,41.96,AUTO,4,Nevada
+
+#30,3.05,3.06,AUTO,1,New Hampshire
+#30,5.78,5.69,ES,2,New Hampshire
+#30,8.02,7.83,ES,3,New Hampshire
+#30,9.91,10.05,AUTO,4,New Hampshire
+
+#31,41.09,40.83,ES,1,New Jersey
+#31,78.04,77.06,ES,2,New Jersey
+#31,121.61,120.10,ES,3,New Jersey
+#31,158.91,157.74,ES,4,New Jersey
+
+#32,29.36,28.82,ES,1,New Mexico
+#32,64.00,59.85,ES,2,New Mexico
+#32,98.51,90.77,ES,3,New Mexico
+#32,129.34,117.58,ES,4,New Mexico
+
+#33,60.17,61.07,ES,1,New York
+#33,107.57,109.18,AUTO,2,New York
+#33,152.4,155.73,AUTO,3,New York
+#33,191.99,202.21,AUTO,4,New York
+
+#34,75.95,75.85,ES,1,North Carolina
+#34,136.64,133.15,ES,2,North Carolina
+#34,210.187,201.87,ES,3,North Carolina
+#34,279.37,265.46,ES,4,North Carolina
+
+#35,4.88,4.85,ES,1,North Dakota
+#35,8.67,8.59,ES,2,North Dakota
+#35,11.12,10.88,ES,3,North Dakota
+#35,13.36,13.13,ES,4,North Dakota
+
+#36,21.02,21.79,AUTO,1,Ohio
+#36,43.54,43.26,ES,2,Ohio
+#36,65.43,63.37,ES,3,Ohio
+#36,87.14,83.11,ES,4,Ohio
+
+#37,28.76,29.28,AUTO,1,Oklahoma
+#37,45.46,42.37,ES,2,Oklahoma
+#37,58.77,52.02,ES,3,Oklahoma
+#37,71.32,61.84,ES,4,Oklahoma
+
+#38,38.59,40.03,AUTO,1,Oregon
+#38,64.75,64.59,ES,2,Oregon
+#38,92.73,88.31,ES,3,Oregon
+#38,129.04,123.28,ES,4,Oregon
+
+#39,43.95,45.61,AUTO,1,Pennsylvania
+#39,89.77,93.54,AUTO,2,Pennsylvania
+#39,134.74,139.19,AUTO,3,Pennsylvania
+#39,178.85,183.35,AUTO,4,Pennsylvania
+
+#40,9.11,9.33,AUTO,1,Rhode Island
+#40,16.42,17.36,AUTO,2,Rhode Island
+#40,22.25,23.89,AUTO,3,Rhode Island
+#40,27.46,30.35,AUTO,4,Rhode Island
+
+#41,23.10,22.88,ES,1,South Carolina
+#41,47.58,44.79,ES,2,South Carolina
+#41,72.57,67.04,ES,3,South Carolina
+#41,93.33,85.68,ES,4,South Carolina
+
+#42,12.53,12.51,ES,1,South Dakota
+#42,21.35,21.42,AUTO,2,South Dakota
+#42,26.73,27.68,AUTO,3,South Dakota
+#42,33.70,34.85,AUTO,4,South Dakota
+
+#43,41.73,40.33,ES,1,Tennessee
+#43,76.17,68.63,ES,2,Tennessee
+#43,114.34,101.55,ES,3,Tennessee
+#43,146.89,129.07,ES,4,Tennessee
+
+#44,82.86,81.30,ES,1,Texas
+#44,183.51,175.43,ES,2,Texas
+#44,257.44,239.43,ES,3,Texas
+#44,332.24,304.00,ES,4,Texas
+
+#45,56.58,55.95,ES,1,Utah
+#45,85.78,81.63,ES,2,Utah
+#45,107.41,99.81,ES,3,Utah
+#45,128.05,118.88,ES,4,Utah
+
+#46,4.22,4.26,AUTO,1,Vermont
+#46,8.33,8.08,ES,2,Vermont
+#46,10.99,10.51,ES,3,Vermont
+#46,13.68,13.15,ES,4,Vermont
+
+#47,187.50,200.83,AUTO,1,Virginia
+#47,321.67,345.39,AUTO,2,Virginia
+#47,473.36,514.22,AUTO,3,Virginia
+#47,608.71,681.17,AUTO,4,Virginia
+
+#48,16.84,17.02,AUTO,1,Washington
+#48,32.86,32.55,ES,2,Washington
+#48,45.75,45.70,ES,3,Washington
+#48,56.95,57.66,AUTO,4,Washington
+
+#49,18.78,19.43,AUTO,1,West Virginia
+#49,38.79,38.50,ES,2,West Virginia
+#49,54.17,52.64,ES,3,West Virginia
+#49,67.81,65.32,ES,4,West Virginia
+
+#50,17.1,16.94,ES,1,Wisconsin
+#50,30.26,29.85,ES,2,Wisconsin
+#50,41.01,40.61,ES,3,Wisconsin
+#50,51.09,50.59,ES,4,Wisconsin
+
+#51,6.78,7.02,AUTO,1,Wyoming
+#51,13.13,13.17,AUTO,2,Wyoming
+#51,17.88,17.32,ES,3,Wyoming
+#51,22.27,21.36,ES,4,Wyoming
+
+#52,22.81,22.22,ES,1,Puerto Rico
+#52,35.29,35.25,ES,2,Puerto Rico
+#52,42.36,42.44,AUTO,3,Puerto Rico
+#52,48.31,48.99,AUTO,4,Puerto Rico
+```
+
+
+
+```{r comparison}
+######################################
+#  Weekly WIS changes by each STATE  #
+######################################
+
+
+#######################################
+#               WIS STATES            #    
+##------------1WEEK_ALABAMA----------##
+wis_a=get_weekly_wis(US_STATE=1, auto=TRUE, my_n_ahead=1)
+wis_alabama<-setNames(wis_a, c("Forecast_Date","Alabama"))
+wis_alabama$Forecast_Date <- as.Date(wis_alabama$Forecast_Date)
+##------------1WEEK_GEORGIA-----------##
+wis_a=get_weekly_wis(US_STATE=11, auto=TRUE, my_n_ahead=1)
+wis_georgia<-setNames(wis_a, c("Forecast_Date","Georgia"))
+wis_georgia$Forecast_Date <- as.Date(wis_georgia$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis(US_STATE=28, auto=TRUE, my_n_ahead=1)
+wis_nebraska<-setNames(wis_a, c("Forecast_Date","Nebraska"))
+wis_nebraska$Forecast_Date <- as.Date(wis_nebraska$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis(US_STATE=17, auto=TRUE, my_n_ahead=1)
+wis_kansas<-setNames(wis_a, c("Forecast_Date","Kansas"))
+wis_kansas$Forecast_Date <- as.Date(wis_kansas$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis(US_STATE=27, auto=TRUE, my_n_ahead=1)
+wis_montana<-setNames(wis_a, c("Forecast_Date","Montana"))
+wis_montana$Forecast_Date <- as.Date(wis_montana$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis(US_STATE=35, auto=TRUE, my_n_ahead=1)
+wis_northdakota<-setNames(wis_a, c("Forecast_Date","North_Dakota"))
+wis_northdakota$Forecast_Date <- as.Date(wis_northdakota$Forecast_Date)
+##------------binding_data------------##
+# List of data frames
+states_wis <- inner_join(wis_georgia, wis_alabama, by = "Forecast_Date") %>%
+          inner_join(wis_kansas, by = "Forecast_Date") %>%
+          inner_join(wis_nebraska, by = "Forecast_Date") %>%
+          inner_join(wis_montana, by = "Forecast_Date") %>%
+          inner_join(wis_northdakota, by = "Forecast_Date")
+##--------------gg_plot---------------##
+states_wis_graph <- pivot_longer(states_wis, cols = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+```
+
+
+```{r comparison}
+
+##################################
+# PLOT WITH 6 STATES WEEKLY WIS #
+################################
+
+ggplot(states_wis_graph, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line() + scale_color_manual(values=c("black","red","purple","green","orange","blue")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal() +  ggtitle("ENSEMBLE ARIMA - WIS x Predicted Week")
+
+```
+
+```{r comparison}
+
+##################################################
+##--- CORRELATION HEATMAP for the 2 STATES ---###
+################################################
+
+states_wis_stats<- subset(states_wis, select = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"))  # Specify columns 'x' and 'y' to keep
+
+#hist(states_wis_stats$North_Dakota)
+correlation_matrix <- cor(states_wis_stats, method="spearman")
+
+corrplot(
+  correlation_matrix,
+  method = "color",
+  type = "upper",
+  tl.cex = 0.8,
+  tl.col = "black",
+  tl.srt = 16,
+  addCoef.col = "black",
+  title = ""
+)
+
+```
+
+```{r comparison}
+####################################
+# Weekly WIS changes by each STATE #
+####################################
+
+##------------------Georgia and Alabama------------------##
+states_wis_GA_AL <- pivot_longer(states_wis, cols = c("Georgia", "Alabama"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_GA_AL, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("black","red"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("GEORGIA AND ALABAMA - AUTO ARIMA")
+##------------------Nebraska and Kansas-----------------##
+states_wis_NE_KA <- pivot_longer(states_wis, cols = c("Nebraska","Kansas"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_NE_KA, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("purple","green")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("NEBRASKA AND KANSAS - AUTO ARIMA")
+##----------------Montana and North Dakota--------------##
+states_wis_MO_ND <- pivot_longer(states_wis, cols = c("Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_MO_ND, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("orange","blue"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("MONTANA AND NORTH DAKOTA - AUTO ARIMA")
+##------------------------------------------##
+```
+
+```{r chunky4, echo=TRUE, message=FALSE}
+###############################
+# GET PREDICTIONS AND CALCULATE THE ERRORS
+###############################
+
+source("ENSEMBLE_ARIMA_FUNCTIONS.R", local = TRUE, chdir = TRUE)
+
+##############################
+# GET ALL PREDICTIONS FOR A SPECIFIC STATE AND N WEEKS AHEAD 
+##############################
+
+all_preds=get_all_preds(US_STATE=11, auto=TRUE, my_n_ahead=1)
+
+##############################
+# GET THE ERRORS using the PREDICTIONS RESULTS
+##############################
+
+my_errors<- GetErrors_Each_State(US_STATE=11, my_data = grouped_data, prediction = all_preds) 
+
+##############
+# PLOT ERRORS
+##############
+
+checkresiduals(my_errors[[1]]) # 
+kpss.test(my_errors[[1]]$residuals)
+mean_absolute_error<-sum(abs(my_errors[[1]]$residuals) )/nrow(my_errors[[1]])
+
+plot(my_errors[[1]]$Error_For_Date, my_errors[[1]]$residuals, main="Ensemble",sub = paste0("mean_absolute_error ",mean_absolute_error, " mean of error ",mean(my_errors[[1]]$residuals)))
+
+abd<-grouped_data[[1]][grouped_data[[1]]$target_end_date%in%my_errors[[1]]$Error_For_Date,]
+plot(abd$target_end_date, abd$cases, main="Ensemble", pch = 20, col= "grey", sub = paste0("mean_absolute_error ",mean_absolute_error, " mean of error ",mean(my_errors[[1]]$residuals)))
+lines(my_errors[[1]]$Error_For_Date, abs(my_errors[[1]]$residuals), col="blue")
+
+```
+
+```{r read-data}
+data <- read.csv('Riley_Results_Combined.csv')
+
+# --------- previous model ------------- #
+ggplot(data,aes(x=Method.With.Lowest.WIS)) + geom_bar()+
+  labs(title = "Previous Ensemble Model - ARIMA[p,d,q][1,0,1]",
+       x = "BEST MODELS", y="Number of Models") + scale_y_continuous(breaks =c(0, 10,20,30,40,50,60,70,80,90,100,110,120,130))
+
+# ----------- current model ------------- #
+data2 <- read.csv('new_model.csv')
+
+ggplot(data2,aes(x=BEST_WIS)) + geom_bar()+
+  labs(title = "Current Ensemble Model - ARIMA[p,d,q]",
+       x = "BEST MODELS", y="Number of Models") + scale_y_continuous(breaks =c(0, 10,20,30,40,50,60,70,80,90,100,110,120,130))
+
+```
+
+Plot weighted interval score for each ensemble
+
+```{r}
+means <- aggregate(ES_WIS ~ WEEK_AHEAD, data = data2, FUN = mean)
+
+##------------------------------------------##
+
+ggplot(data2, aes(x = ES_WIS)) +
+  geom_histogram(binwidth = 10, fill = "blue", color = "black") +
+  geom_vline(data = means, aes(xintercept = ES_WIS), color = "red", linetype = "dashed") +
+  facet_wrap(~ WEEK_AHEAD, nrow = 2) +
+  labs(title = "Current Model Weighted Interval Score for 50 US states",
+       x = "Weighted Interval Score",
+       y = "Frequency") +
+  annotate("text", x = means$Value, y = 2, label = means$Value, color = "red") +
+  theme_minimal()
+
+##------------------------------------------##
+```
+
+Here we compare the ensemble model with the function `auto.arima`.
+
+
+```{r comparison}
+##------------------------------------------##
+boxplot(log(data2$ES_WIS), log(data2$AUTO_WIS),
+        names=c('Ensemble','Auto ARIMA'),
+        ylab='log(Weighted Interval Score)')
+##------------------------------------------##
+```
+
+
+```{r pressure, echo=FALSE}
+#######################
+# CREATE THE US MAP  #
+#####################
+
+states <- read_sf("cb_2018_us_state_500k/cb_2018_us_state_500k.shp")
+
+df <- subset(data2, select = c(NAME,ES_WIS,AUTO_WIS,WEEK_AHEAD,BEST_WIS))%>%
+  mutate(WIS_DIFF = (AUTO_WIS-ES_WIS))
+
+df<-setNames(df, c("NAME","WIS_ES","WIS_AUTO","N_WEEK_AHEAD","BEST_WIS","WIS_DIF"))
+
+################################################################
+#ES_ARIMA 1 week ahead
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week1<-left_join(states, week1, by=join_by("NAME"))
+
+ES_1WEEK<- ggplot(map_week1, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_ES)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("ENSEMBLE ARIMA - 1 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_1WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+################################################################
+#ES_ARIMA 2 week ahead
+
+target <- c(2)
+week2<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week2<-left_join(states, week2,by="NAME")
+
+ES_2WEEK<- ggplot(map_week2, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_ES)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("ENSEMBLE ARIMA - 2 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_2WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+
+################################################################
+#ES_ARIMA 3 week ahead
+
+target <- c(3)
+week3<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week3<-left_join(states, week3, by="NAME")
+
+ES_3WEEK<- ggplot(map_week3, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_ES)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("ENSEMBLE ARIMA - 3 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_3WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+#################################################################
+#ES_ARIMA 4 week ahead
+
+target <- c(4)
+week4<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week4<-left_join(states, week4,by="NAME")
+
+ES_4WEEK<- ggplot(map_week4, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_ES)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("ENSEMBLE ARIMA - 4 WEEK AHEAD") 
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_4WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+
+
+```
+
+```{r comparison}
+#######################################################
+#ES_ARIMA 1 week ahead
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+ES_1WEEK<- ggplot(map_week1, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=BEST_WIS)) +  scale_color_fermenter("NAME", palette="RdYlBu") +  ggtitle("ENSEMBLE x AUTO ARIMA - 1 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_1WEEK + coord_sf(xlim = x_limits, ylim = y_limits) 
+
+################################################################
+#ES_ARIMA 2 week ahead
+
+target <- c(2)
+week2<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+ES_2WEEK<- ggplot(map_week2, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=BEST_WIS)) +  scale_color_fermenter("NAME", palette="RdYlBu") +  ggtitle("ENSEMBLE x AUTO ARIMA - 2 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_2WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+################################################################
+#ES_ARIMA 3 week ahead
+
+target <- c(3)
+week3<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+ES_3WEEK<- ggplot(map_week3, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=BEST_WIS)) +  scale_color_fermenter("NAME", palette="RdYlBu") +  ggtitle("ENSEMBLE x AUTO ARIMA - 3 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_3WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+#################################################################
+#ES_ARIMA 4 week ahead
+
+target <- c(4)
+week4<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+ES_4WEEK<- ggplot(map_week4, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=BEST_WIS)) +  scale_color_fermenter("NAME", palette="RdYlBu") +  ggtitle("ENSEMBLE x AUTO ARIMA - 4 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_4WEEK + coord_sf(xlim = x_limits, ylim = y_limits)  
+
+```
+
+
+```{r comparison}
+
+############################
+#AUTO_ARIMA 1 week ahead  #
+##########################
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week1<-left_join(states, week1)
+
+ES_1WEEK<- ggplot(map_week1, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_AUTO)) +  scale_fill_distiller("WIS", palette="Spectral", breaks =c(50,100,150)) +  ggtitle("AUTO ARIMA - 1 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_1WEEK + coord_sf(xlim = x_limits, ylim = y_limits) +theme_minimal()
+
+############################
+# AUTO_ARIMA 2 week ahead #
+##########################
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week2<-left_join(states, week2)
+ES_2WEEK<- ggplot(map_week2, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_AUTO)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("AUTO ARIMA - 2 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_2WEEK + coord_sf(xlim = x_limits, ylim = y_limits) +theme_minimal() 
+
+############################
+# AUTO_ARIMA 3 week ahead #
+##########################
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week3<-left_join(states, week3)
+
+ES_3WEEK<- ggplot(map_week3, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_AUTO)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("AUTO ARIMA - 3 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_3WEEK + coord_sf(xlim = x_limits, ylim = y_limits) +theme_minimal() 
+
+##########################
+#AUTO_ARIMA 4 week ahead
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week4<-left_join(states, week4)
+
+ES_4WEEK<- ggplot(map_week4, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_AUTO)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("AUTO ARIMA - 4 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ES_4WEEK + coord_sf(xlim = x_limits, ylim = y_limits) +theme_minimal() 
+
+
+```
+
+
+```{r comparison}
+
+##########################
+#AUTO_ARIMA 1 week ahead
+#########################
+
+GA<-data.frame(y=c(33.095),x=c(-83.504),Name="GA")
+AL<-data.frame(y=c(32.469),x=c(-86.819),Name="AL")
+NE<-data.frame(y=c(41.744),x=c(-100.079),Name="NE")
+KS<-data.frame(y=c(38.223),x=c(-98.366),Name="KS")
+ND<-data.frame(y=c(47.882),x=c(-100.607),Name="ND")
+MT<-data.frame(y=c(46.483),x=c(-109.408),Name="MT")
+
+point_states<-rbind(GA,AL,NE,KS,ND,MT)
+
+target <- c(1)
+week1<-df %>%
+  filter(N_WEEK_AHEAD == target)
+
+map_week1<-left_join(states, week1, by=join_by("NAME"))
+
+ES_1WEEK<- ggplot(map_week1, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_ES)) +  scale_fill_distiller("WIS", palette="Spectral") +  ggtitle("ENSEMBLE ARIMA - 1 WEEK AHEAD")
+
+x_limits <- c(-180, -70)  # Set the desired longitude range
+y_limits <- c(20, 70)    # Set the desired latitude range
+
+ggplot(map_week1, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_AUTO)) +  scale_fill_distiller("WIS", palette="Spectral", limit=c(0, 200)) +  ggtitle("AUTO ARIMA - 1 WEEK AHEAD")+coord_sf(xlim = x_limits, ylim = y_limits) + theme_minimal()+ geom_point(data=point_states,aes(x,y)) +
+  geom_point(data = point_states, aes(x, y)) +
+  theme(axis.line = element_blank(),  # Removes axis lines
+        axis.text = element_blank(),  # Removes axis text
+        axis.title = element_blank()  # Removes axis titles (if any)
+  ) +
+geom_text_repel(arrow=arrow(length = unit(0.0003, "npc")), data = point_states, aes(x = x, y = y, label = Name , fontface="bold" ),  nudge_x = 1, nudge_y = 0, size = 4.0) 
+
+#####################################################################
+
+pointss<-ggplot(map_week1, fill ="lightgrey") +  theme_light()  + geom_sf(aes(fill=WIS_ES)) +  scale_fill_distiller("WIS", palette="Spectral", limit=c(0, 220)) +  ggtitle("ENSEMBLE ARIMA - 1 WEEK AHEAD")+coord_sf(xlim = x_limits, ylim = y_limits) + theme_minimal()+ 
+  geom_point(data = point_states, aes(x, y)) +
+  theme(axis.line = element_blank(),  # Removes axis lines
+        axis.text = element_blank(),  # Removes axis text
+        axis.title = element_blank()  # Removes axis titles (if any)
+  ) + geom_point(data=point_states,aes(x,y)) +
+geom_text_repel(arrow=arrow(length = unit(0.0003, "npc")), data = point_states, aes(x = x, y = y, label = Name , fontface="bold" ),  nudge_x = 1, nudge_y = 0, size = 4.0) 
+
+pointss
+
+```
+
+
