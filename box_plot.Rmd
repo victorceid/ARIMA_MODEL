@@ -1,0 +1,327 @@
+```{r comparison}
+######################################
+#  Weekly WIS changes by each STATE  #
+######################################
+
+source("ENSEMBLE_ARIMA_FUNCTIONS.R", local = TRUE, chdir = TRUE)
+
+#######################################
+#               WIS STATES            #    
+##------------1WEEK_ALABAMA----------##
+wis_a=get_weekly_wis_27per(US_STATE=1, auto=TRUE, my_n_ahead=1)
+wis_alabama<-setNames(wis_a, c("Forecast_Date","Alabama"))
+wis_alabama$Forecast_Date <- as.Date(wis_alabama$Forecast_Date)
+##------------1WEEK_GEORGIA-----------##
+wis_a=get_weekly_wis_27per(US_STATE=11, auto=TRUE, my_n_ahead=1)
+wis_georgia<-setNames(wis_a, c("Forecast_Date","Georgia"))
+wis_georgia$Forecast_Date <- as.Date(wis_georgia$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis_27per(US_STATE=28, auto=TRUE, my_n_ahead=1)
+wis_nebraska<-setNames(wis_a, c("Forecast_Date","Nebraska"))
+wis_nebraska$Forecast_Date <- as.Date(wis_nebraska$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis_27per(US_STATE=17, auto=TRUE, my_n_ahead=1)
+wis_kansas<-setNames(wis_a, c("Forecast_Date","Kansas"))
+wis_kansas$Forecast_Date <- as.Date(wis_kansas$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis_27per(US_STATE=27, auto=TRUE, my_n_ahead=1)
+wis_montana<-setNames(wis_a, c("Forecast_Date","Montana"))
+wis_montana$Forecast_Date <- as.Date(wis_montana$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis_27per(US_STATE=35, auto=TRUE, my_n_ahead=1)
+wis_northdakota<-setNames(wis_a, c("Forecast_Date","North_Dakota"))
+wis_northdakota$Forecast_Date <- as.Date(wis_northdakota$Forecast_Date)
+##------------binding_data------------##
+# List of data frames
+states_wis <- inner_join(wis_georgia, wis_alabama, by = "Forecast_Date") %>%
+          inner_join(wis_kansas, by = "Forecast_Date") %>%
+          inner_join(wis_nebraska, by = "Forecast_Date") %>%
+          inner_join(wis_montana, by = "Forecast_Date") %>%
+          inner_join(wis_northdakota, by = "Forecast_Date")
+##--------------gg_plot---------------##
+states_wis_graph <- pivot_longer(states_wis, cols = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+```
+
+
+```{r comparison}
+
+##################################
+# PLOT WITH 6 STATES WEEKLY WIS #
+################################
+
+ggplot(states_wis_graph, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line() + scale_color_manual(values=c("black","red","purple","green","orange","blue")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal() +  ggtitle("AUTO - WIS x Predicted Week")
+
+```
+
+```{r comparison}
+
+##################################################
+##--- CORRELATION HEATMAP for the 2 STATES ---###
+################################################
+
+states_wis_stats<- subset(states_wis, select = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"))  # Specify columns 'x' and 'y' to keep
+
+#hist(states_wis_stats$North_Dakota)
+correlation_matrix <- cor(states_wis_stats, method="spearman")
+
+corrplot(
+  correlation_matrix,
+  method = "color",
+  type = "upper",
+  tl.cex = 0.8,
+  tl.col = "black",
+  tl.srt = 16,
+  addCoef.col = "black",
+  title = ""
+)
+
+```
+
+```{r comparison}
+####################################
+# Weekly WIS changes by each STATE #
+####################################
+
+##------------------Georgia and Alabama------------------##
+states_wis_GA_AL <- pivot_longer(states_wis, cols = c("Georgia", "Alabama"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_GA_AL, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("black","red"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("GEORGIA AND ALABAMA - AUTO")
+##------------------Nebraska and Kansas-----------------##
+states_wis_NE_KA <- pivot_longer(states_wis, cols = c("Nebraska","Kansas"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_NE_KA, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("purple","green")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("NEBRASKA AND KANSAS - AUTO")
+##----------------Montana and North Dakota--------------##
+states_wis_MO_ND <- pivot_longer(states_wis, cols = c("Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_MO_ND, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("orange","blue"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("MONTANA AND NORTH DAKOTA - AUTO")
+##------------------------------------------##
+```
+
+
+
+
+27 permutations
+
+
+
+
+```{r comparison}
+######################################
+#  Weekly WIS changes by each STATE  #
+######################################
+
+source("ENSEMBLE_ARIMA_FUNCTIONS.R", local = TRUE, chdir = TRUE)
+
+#######################################
+#               WIS STATES            #    
+##------------1WEEK_ALABAMA----------##
+wis_a=get_weekly_wis_27per(US_STATE=1, auto=FALSE, my_n_ahead=1)
+wis_alabama_27<-setNames(wis_a, c("Forecast_Date","Alabama"))
+wis_alabama_27$Forecast_Date <- as.Date(wis_alabama_27$Forecast_Date)
+##------------1WEEK_GEORGIA-----------##
+wis_a=get_weekly_wis_27per(US_STATE=11, auto=FALSE, my_n_ahead=1)
+wis_georgia_27<-setNames(wis_a, c("Forecast_Date","Georgia"))
+wis_georgia_27$Forecast_Date <- as.Date(wis_georgia_27$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis_27per(US_STATE=28, auto=FALSE, my_n_ahead=1)
+wis_nebraska_27<-setNames(wis_a, c("Forecast_Date","Nebraska"))
+wis_nebraska_27$Forecast_Date <- as.Date(wis_nebraska_27$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis_27per(US_STATE=17, auto=FALSE, my_n_ahead=1)
+wis_kansas_27<-setNames(wis_a, c("Forecast_Date","Kansas"))
+wis_kansas_27$Forecast_Date <- as.Date(wis_kansas_27$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis_27per(US_STATE=27, auto=FALSE, my_n_ahead=1)
+wis_montana_27<-setNames(wis_a, c("Forecast_Date","Montana"))
+wis_montana_27$Forecast_Date <- as.Date(wis_montana_27$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis_27per(US_STATE=35, auto=FALSE, my_n_ahead=1)
+wis_northdakota_27<-setNames(wis_a, c("Forecast_Date","North_Dakota"))
+wis_northdakota_27$Forecast_Date <- as.Date(wis_northdakota_27$Forecast_Date)
+##------------binding_data------------##
+# List of data frames
+states_wis_27 <- inner_join(wis_georgia_27, wis_alabama_27, by = "Forecast_Date") %>%
+          inner_join(wis_kansas_27, by = "Forecast_Date") %>%
+          inner_join(wis_nebraska_27, by = "Forecast_Date") %>%
+          inner_join(wis_montana_27, by = "Forecast_Date") %>%
+          inner_join(wis_northdakota_27, by = "Forecast_Date")
+##--------------gg_plot---------------##
+states_wis_graph_27 <- pivot_longer(states_wis, cols = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+```
+
+
+```{r comparison}
+
+##################################
+# PLOT WITH 6 STATES WEEKLY WIS #
+################################
+
+ggplot(states_wis_graph_27, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line() + scale_color_manual(values=c("black","red","purple","green","orange","blue")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal() +  ggtitle("ES27 - WIS x Predicted Week")
+
+```
+
+```{r comparison}
+
+##################################################
+##--- CORRELATION HEATMAP for the 2 STATES ---###
+################################################
+
+states_wis_stats_27<- subset(states_wis_27, select = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"))  # Specify columns 'x' and 'y' to keep
+
+#hist(states_wis_stats$North_Dakota)
+correlation_matrix <- cor(states_wis_stats_27, method="spearman")
+
+corrplot(
+  correlation_matrix,
+  method = "color",
+  type = "upper",
+  tl.cex = 0.8,
+  tl.col = "black",
+  tl.srt = 16,
+  addCoef.col = "black",
+  title = ""
+)
+
+```
+
+```{r comparison}
+####################################
+# Weekly WIS changes by each STATE #
+####################################
+
+##------------------Georgia and Alabama------------------##
+states_wis_GA_AL_27 <- pivot_longer(states_wis_27, cols = c("Georgia", "Alabama"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_GA_AL_27, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("black","red"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("GEORGIA AND ALABAMA - ES27")
+##------------------Nebraska and Kansas-----------------##
+states_wis_NE_KA_27 <- pivot_longer(states_wis_27, cols = c("Nebraska","Kansas"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_NE_KA_27, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("purple","green")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("NEBRASKA AND KANSAS - ES27")
+##----------------Montana and North Dakota--------------##
+states_wis_MO_ND_27 <- pivot_longer(states_wis_27, cols = c("Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_MO_ND_27, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("orange","blue"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("MONTANA AND NORTH DAKOTA - ES27")
+##------------------------------------------##
+```
+
+
+
+
+
+```{r comparison}
+######################################
+#  Weekly WIS changes by each STATE  #
+######################################
+
+source("ENSEMBLE_ARIMA_FUNCTIONS.R", local = TRUE, chdir = TRUE)
+
+#######################################
+#               WIS STATES            #    
+##------------1WEEK_ALABAMA----------##
+wis_a=get_weekly_wis_64per(US_STATE=1, auto=FALSE, my_n_ahead=1)
+wis_alabama_64<-setNames(wis_a, c("Forecast_Date","Alabama"))
+wis_alabama_64$Forecast_Date <- as.Date(wis_alabama_64$Forecast_Date)
+##------------1WEEK_GEORGIA-----------##
+wis_a=get_weekly_wis_64per(US_STATE=11, auto=FALSE, my_n_ahead=1)
+wis_georgia_64<-setNames(wis_a, c("Forecast_Date","Georgia"))
+wis_georgia_64$Forecast_Date <- as.Date(wis_georgia_64$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis_64per(US_STATE=28, auto=FALSE, my_n_ahead=1)
+wis_nebraska_64<-setNames(wis_a, c("Forecast_Date","Nebraska"))
+wis_nebraska_64$Forecast_Date <- as.Date(wis_nebraska_64$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis_64per(US_STATE=17, auto=FALSE, my_n_ahead=1)
+wis_kansas_64<-setNames(wis_a, c("Forecast_Date","Kansas"))
+wis_kansas_64$Forecast_Date <- as.Date(wis_kansas_64$Forecast_Date)
+##------------1WEEK_NEBRASKA----------##
+wis_a=get_weekly_wis_64per(US_STATE=27, auto=FALSE, my_n_ahead=1)
+wis_montana_64<-setNames(wis_a, c("Forecast_Date","Montana"))
+wis_montana_64$Forecast_Date <- as.Date(wis_montana_64$Forecast_Date)
+##-------------1WEEK_KANSAS-----------##
+wis_a=get_weekly_wis_64per(US_STATE=35, auto=FALSE, my_n_ahead=1)
+wis_northdakota_64<-setNames(wis_a, c("Forecast_Date","North_Dakota"))
+wis_northdakota_64$Forecast_Date <- as.Date(wis_northdakota_64$Forecast_Date)
+##------------binding_data------------##
+# List of data frames
+states_wis_64 <- inner_join(wis_georgia_64, wis_alabama_64, by = "Forecast_Date") %>%
+          inner_join(wis_kansas_64, by = "Forecast_Date") %>%
+          inner_join(wis_nebraska_64, by = "Forecast_Date") %>%
+          inner_join(wis_montana_64, by = "Forecast_Date") %>%
+          inner_join(wis_northdakota_64, by = "Forecast_Date")
+##--------------gg_plot---------------##
+states_wis_graph_64 <- pivot_longer(states_wis, cols = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+```
+
+
+```{r comparison}
+
+##################################
+# PLOT WITH 6 STATES WEEKLY WIS #
+################################
+
+ggplot(states_wis_graph_64, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line() + scale_color_manual(values=c("black","red","purple","green","orange","blue")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal() +  ggtitle("ES64 - WIS x Predicted Week")
+
+```
+
+```{r comparison}
+
+##################################################
+##--- CORRELATION HEATMAP for the 2 STATES ---###
+################################################
+
+states_wis_stats_64<- subset(states_wis_64, select = c("Georgia", "Alabama","Nebraska","Kansas","Montana","North_Dakota"))  # Specify columns 'x' and 'y' to keep
+
+#hist(states_wis_stats$North_Dakota)
+correlation_matrix <- cor(states_wis_stats_64, method="spearman")
+
+corrplot(
+  correlation_matrix,
+  method = "color",
+  type = "upper",
+  tl.cex = 0.8,
+  tl.col = "black",
+  tl.srt = 16,
+  addCoef.col = "black",
+  title = ""
+)
+
+```
+
+```{r comparison}
+####################################
+# Weekly WIS changes by each STATE #
+####################################
+
+##------------------Georgia and Alabama------------------##
+states_wis_GA_AL_64 <- pivot_longer(states_wis_64, cols = c("Georgia", "Alabama"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_GA_AL_64, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("black","red"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("GEORGIA AND ALABAMA - ES64")
+##------------------Nebraska and Kansas-----------------##
+states_wis_NE_KA_64 <- pivot_longer(states_wis_64, cols = c("Nebraska","Kansas"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_NE_KA_64, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("purple","green")) +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("NEBRASKA AND KANSAS - ES64")
+##----------------Montana and North Dakota--------------##
+states_wis_MO_ND_64 <- pivot_longer(states_wis_64, cols = c("Montana","North_Dakota"), names_to = "States", values_to = "WIS")
+
+ggplot(states_wis_MO_ND_64, aes(Forecast_Date, WIS, group = States, color = States)) + geom_line()  + scale_color_manual(values=c("orange","blue"))  +labs(y= "Weighted Interval Score(WIS)", x = "Predicted Week") +scale_x_date(date_breaks="1 year" , date_labels = "%Y") + theme_minimal()+  ggtitle("MONTANA AND NORTH DAKOTA - ES64")
+##------------------------------------------##
+```
+
+
+
+
+
+```{r comparison}
+##------------------------------------------##
+boxplot(log(states_wis_64$Georgia),log(states_wis_27$Georgia), log(states_wis$Georgia),
+log(states_wis_64$Alabama),log(states_wis_27$Alabama), log(states_wis$Alabama),
+log(states_wis_64$Nebraska),log(states_wis_27$Nebraska), log(states_wis$Nebraska),
+log(states_wis_64$Kansas),log(states_wis_27$Kansas),log(states_wis$Kansas), log(states_wis_64$North_Dakota),log(states_wis_27$North_Dakota), log(states_wis$North_Dakota),
+log(states_wis_64$Montana),log(states_wis_27$Montana), log(states_wis$Montana),
+        names=c('','GA','','','AL','','','NE','','',"KS","","","ND","","","MT",""),
+        ylab='log(Weighted Interval Score)', main = "ES64, ES27 and AUTO ARIMA by State")
+##------------------------------------------##
+```
